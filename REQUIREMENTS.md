@@ -1,6 +1,6 @@
 # 汽车救援定位自动化工具 — 需求文档
 
-> 版本：v1.0  
+> 版本：v1.1  
 > 日期：2026-04-26  
 > 状态：需求确认中
 
@@ -51,7 +51,52 @@
 | 状态显示 | 运行状态、已上报次数、剩余时间、当前位置 | P1 |
 | 日志输出 | 实时显示每次上报结果 | P1 |
 
-### 2.2 定位上报接口
+### [新增] 2.2 地理编码功能
+
+**输入方式（双模）：**
+- 模式 A：输入文字地址 → 调用高德地理编码 API → 自动解析为经纬度
+- 模式 B：直接输入经纬度（格式：`116.481028,39.989643`）
+
+**地理编码接口：**
+```
+GET https://restapi.amap.com/v3/geocode/geo
+```
+
+| 参数 | 说明 |
+|------|------|
+| `key` | 高德 API Key |
+| `address` | 用户输入的地址文本 |
+| `city` | 城市（可选，提高精度） |
+
+**解析规则：**
+- 返回 `geocodes[0].location` 作为坐标
+- 若 `count == 0` 则提示用户"地址未找到，请修改后重试"
+- 解析成功后在地图上显示 Pin，供用户二次确认
+
+### [新增] 2.3 上报频率可选
+
+| 选项 | 间隔 | 适用场景 |
+|------|------|---------|
+| 10 秒 | 10s | 短途任务（< 5km） |
+| 20 秒 | 20s | 中途任务 |
+| 30 秒（默认） | 30s | 标准任务 |
+
+- 频率在任务启动前配置，启动后不可修改
+- 坐标采样密度随频率自动调整（速度 × 间隔 = 采样步长）
+
+### [新增] 2.4 路径保存与复用
+
+**保存：**
+- 任务完成后弹出「保存路线」对话框
+- 用户可输入路线名称（如"南京-常州救援路线"）
+- 存入 MongoDB `saved_routes` 集合
+
+**复用：**
+- 新建任务时，顶部显示「从历史路线选择」下拉框
+- 选中后自动填充起点、终点文字地址和对应经纬度
+- 不影响当前的 caseId / workId 输入
+
+### 2.5 定位上报接口（原 2.2）
 
 **接口地址：**
 ```
@@ -85,7 +130,7 @@ POST https://dragon.deploy-test.xiaopeng.com/open/dragon/yeKeDaRescue/technician
 | workId | 工单号 | 用户输入 |
 | locateTime | 定位时间 | 当前时间 |
 
-### 2.3 高德路径规划 API
+### 2.6 高德路径规划 API（原 2.3）
 
 **接口地址：**
 ```
@@ -164,6 +209,141 @@ rescue-location-automation/
 | `/api/task/status` | GET | - | 获取任务状态 |
 | `/api/task/logs` | GET | - | 获取上报日志 |
 
+### [新增] 3.3.1 API 完整 Request / Response 规范
+
+**POST /api/task/start**
+
+Request:
+```json
+{
+  "caseId": "2604102700015",
+  "workId": "DRTC_RO_20260410_QV0010",
+  "origin": {
+    "address": "南京南站",
+    "lon": "118.77678",
+    "lat": "31.97488"
+  },
+  "destination": {
+    "address": "常州北站",
+    "lon": "119.97386",
+    "lat": "31.78234"
+  },
+  "speed": 60,
+  "interval": 30
+}
+```
+
+Response (成功):
+```json
+{
+  "code": 200,
+  "data": {
+    "taskId": "task_20260426_001",
+    "totalPoints": 48,
+    "estimatedDuration": 1440,
+    "routeDistance": 87500
+  }
+}
+```
+
+Response (失败):
+```json
+{
+  "code": 400,
+  "msg": "路径规划失败：起终点距离超出范围",
+  "data": null
+}
+```
+
+**GET /api/task/status**
+
+Response:
+```json
+{
+  "code": 200,
+  "data": {
+    "taskId": "task_20260426_001",
+    "state": "running",
+    "reportedCount": 12,
+    "totalPoints": 48,
+    "progress": 25,
+    "remainingTime": 1080,
+    "currentPosition": { "lon": "118.92345", "lat": "31.88765" },
+    "lastReportTime": "2026-04-26 10:15:30",
+    "lastReportSuccess": true
+  }
+}
+```
+
+state 枚举：`idle` / `running` / `paused` / `stopped` / `completed`
+
+**GET /api/task/logs?page=1&limit=20**
+
+Response:
+```json
+{
+  "code": 200,
+  "data": {
+    "total": 12,
+    "logs": [
+      {
+        "seq": 1,
+        "timestamp": "2026-04-26 10:00:00",
+        "lon": "118.77678",
+        "lat": "31.97488",
+        "success": true,
+        "responseCode": 200,
+        "responseMsg": "成功"
+      }
+    ]
+  }
+}
+```
+
+### [新增] 3.3.2 路径保存 / 复用接口
+
+**POST /api/routes/save**
+
+Request:
+```json
+{
+  "name": "南京南站-常州北站",
+  "origin": { "address": "南京南站", "lon": "118.77678", "lat": "31.97488" },
+  "destination": { "address": "常州北站", "lon": "119.97386", "lat": "31.78234" }
+}
+```
+
+Response:
+```json
+{ "code": 200, "data": { "routeId": "route_abc123" } }
+```
+
+**GET /api/routes/list**
+
+Response:
+```json
+{
+  "code": 200,
+  "data": [
+    {
+      "routeId": "route_abc123",
+      "name": "南京南站-常州北站",
+      "origin": { "address": "南京南站", "lon": "118.77678", "lat": "31.97488" },
+      "destination": { "address": "常州北站", "lon": "119.97386", "lat": "31.78234" },
+      "usedCount": 3,
+      "lastUsedAt": "2026-04-25 09:00:00"
+    }
+  ]
+}
+```
+
+**DELETE /api/routes/:routeId**
+
+Response:
+```json
+{ "code": 200, "data": null }
+```
+
 ### 3.4 数据模型
 
 ```typescript
@@ -201,6 +381,79 @@ interface ReportLog {
 }
 ```
 
+### [新增] 3.4.1 MongoDB 集合定义
+
+**集合 `tasks`**
+
+```js
+{
+  _id: ObjectId,
+  taskId: String,           // 唯一任务 ID，格式 task_YYYYMMDD_seq
+  caseId: String,
+  workId: String,
+  origin: {
+    address: String,
+    lon: String,
+    lat: String
+  },
+  destination: {
+    address: String,
+    lon: String,
+    lat: String
+  },
+  speed: Number,            // km/h
+  interval: Number,         // 上报间隔秒数
+  state: String,            // idle / running / paused / stopped / completed
+  totalPoints: Number,
+  reportedCount: Number,
+  routePoints: [            // 完整路径坐标序列（由高德返回后存储）
+    { lon: String, lat: String }
+  ],
+  createdAt: Date,
+  updatedAt: Date
+}
+```
+
+索引：`taskId`（唯一），`createdAt`（降序）
+
+**集合 `report_logs`**
+
+```js
+{
+  _id: ObjectId,
+  taskId: String,
+  seq: Number,              // 本次任务第几次上报
+  lon: String,
+  lat: String,
+  actionTime: String,
+  locateTime: String,
+  responseCode: Number,
+  responseMsg: String,
+  success: Boolean,
+  retryCount: Number,       // 本次上报重试次数（0-3）
+  createdAt: Date
+}
+```
+
+索引：`taskId + seq`（复合唯一），`createdAt`
+
+**集合 `saved_routes`**
+
+```js
+{
+  _id: ObjectId,
+  routeId: String,
+  name: String,
+  origin: { address: String, lon: String, lat: String },
+  destination: { address: String, lon: String, lat: String },
+  usedCount: Number,
+  lastUsedAt: Date,
+  createdAt: Date
+}
+```
+
+索引：`routeId`（唯一），`lastUsedAt`（降序）
+
 ---
 
 ## 四、非功能需求
@@ -213,11 +466,136 @@ interface ReportLog {
 | 易用性 | 界面简洁，操作步骤少 |
 | 可维护性 | 代码结构清晰，有日志输出 |
 
+### [新增] 4.1 性能需求
+
+| 指标 | 目标 |
+|------|------|
+| 地理编码响应 | < 1s（高德 API SLA） |
+| 路径规划响应 | < 2s（高德 API SLA） |
+| 任务状态刷新 | 前端轮询间隔 5s，状态延迟 ≤ 5s |
+| 上报成功率 | ≥ 99%（3 次重试后） |
+| MongoDB 写入 | 单次 < 100ms |
+| 前端首屏加载 | < 3s（Vercel CDN） |
+
+### [新增] 4.2 安全需求
+
+| 项目 | 要求 |
+|------|------|
+| 高德 Key 保护 | 仅在后端使用，不暴露给前端；前端通过后端代理调用 |
+| 接口防滥用 | 后端对 `/api/task/start` 加速率限制（10次/分钟/IP） |
+| 环境变量 | 所有密钥通过环境变量注入，不写入代码 |
+| HTTPS | 前后端全程 HTTPS，禁止 HTTP 降级 |
+| 错误信息 | 生产环境不返回堆栈信息，只返回业务错误码 |
+
+### [新增] 4.3 兼容性需求
+
+| 项目 | 要求 |
+|------|------|
+| 浏览器 | Chrome 90+、Edge 90+（主要使用场景） |
+| 屏幕分辨率 | 1280×720 及以上 |
+| 网络环境 | 支持 4G/WiFi，弱网下上报失败自动重试 |
+| 移动端 | 不作要求（PC 工具） |
+
 ---
 
-## 五、部署方案
+## [新增] 五、用户操作流程与交互细节
 
-### 5.1 前端部署
+### 5.1 完整操作流程（12 步）
+
+```
+1. 打开工具页面
+2. 在「历史路线」下拉框选择已保存路线（可跳过）
+3. 输入起点地址（或经纬度）
+4. 输入终点地址（或经纬度）
+5. 系统自动地理编码，地图 Pin 显示解析结果
+6. 用户确认 Pin 位置正确（如不正确，修改地址重新解析）
+7. 选择行驶速度（默认 60 km/h）
+8. 选择上报频率（默认 30 秒）
+9. 输入 caseId（订单号）和 workId（工单号）
+10. 点击「预览路线」→ 地图显示完整路径，展示里程和预计时长
+11. 确认无误后点击「开始任务」
+12. 任务运行中：查看进度条、上报日志；可随时暂停/继续/停止
+```
+
+### 5.2 表单校验规则
+
+| 字段 | 校验规则 | 错误提示 |
+|------|---------|---------|
+| 起点地址 | 非空 | "请输入起点地址" |
+| 终点地址 | 非空 | "请输入终点地址" |
+| 起点经纬度 | 格式 `lon,lat`，数值范围有效 | "经纬度格式错误，示例：116.481,39.989" |
+| caseId | 非空，长度 ≤ 50 | "请输入订单号" |
+| workId | 非空，长度 ≤ 50 | "请输入工单号" |
+| 速度自定义 | 正整数，10–200 | "速度需在 10-200 km/h 之间" |
+| 频率 | 枚举值（10/20/30） | — |
+
+### 5.3 任务状态机
+
+```
+         ┌─────────────────────────────┐
+         │                             │
+        idle ──[start]──> running ──[pause]──> paused
+                            │                    │
+                         [stop]               [resume]
+                            │                    │
+                         stopped           running ◄──┘
+                            
+        running ──[全部点上报完毕]──> completed
+```
+
+状态说明：
+- `idle`：初始状态，表单可编辑
+- `running`：定时器运行中，表单锁定，显示进度
+- `paused`：定时器暂停，保留当前进度，可继续
+- `stopped`：用户主动停止，进度清零，表单解锁
+- `completed`：所有坐标点上报完毕，弹出「保存路线」对话框
+
+---
+
+## [新增] 六、异常场景处理
+
+### 6.1 地理编码失败
+
+| 情况 | 处理方式 |
+|------|---------|
+| 地址解析结果为空 | 提示"地址未找到，请修改后重试"，不进入路径规划 |
+| 高德 API 超时（> 5s） | 提示"地理编码超时，请检查网络后重试" |
+| 高德 API 返回错误码 | 显示具体错误（如 "INVALID_USER_KEY"） |
+
+### 6.2 路径规划失败
+
+| 情况 | 处理方式 |
+|------|---------|
+| 起终点相同 | 前端校验拦截，提示"起终点不能相同" |
+| 起终点超出距离限制（> 500km） | 提示"路程过长，请检查起终点" |
+| 高德 API 无路线结果 | 提示"无法规划路线，请尝试其他地址" |
+| 高德 API 限额超出 | 提示"API 调用超限，请联系管理员更换 Key" |
+
+### 6.3 定位上报失败
+
+| 情况 | 处理方式 |
+|------|---------|
+| HTTP 超时（> 10s） | 标记为失败，自动重试，最多 3 次 |
+| 返回非 200 状态码 | 记录响应码，标记失败，加入重试队列 |
+| 3 次重试均失败 | 在日志中标红显示，任务继续执行（不中断） |
+| 连续 5 次上报失败 | 暂停任务，弹出警告"连续上报失败，请检查网络或接口" |
+
+### 6.4 浏览器关闭 / 刷新
+
+- 任务状态存储在**后端内存 + MongoDB**，前端关闭后任务继续运行
+- 重新打开页面时，前端轮询 `/api/task/status`，恢复显示运行状态
+- 若后端进程重启（Railway 休眠后唤醒），任务状态从 MongoDB 恢复，但定时器需重新激活（用户手动点「恢复任务」）
+
+### 6.5 网络断开
+
+- 前端检测到 `/api/task/status` 请求连续失败 3 次，显示"后端连接异常"横幅
+- 后端若无法触达上报接口，按 6.3 策略处理，不影响计时器运行
+
+---
+
+## 七（原五）、部署方案
+
+### 7.1 前端部署
 
 - **平台：** Vercel
 - **配置：**
@@ -225,14 +603,14 @@ interface ReportLog {
   - Framework: Vue.js
   - Build: `npm run build`
 
-### 5.2 后端部署
+### 7.2 后端部署
 
 - **平台：** Railway
   - 自动检测 Dockerfile
   - 配置环境变量：`AMAP_KEY`、`REPORT_URL`、`MONGODB_URI`
   - ⚠️ 注意：Railway 免费版有休眠，长时间任务需升级或用 keep-alive
 
-### 5.3 环境变量
+### 7.3 环境变量
 
 | 变量 | 说明 | 示例 |
 |------|------|------|
@@ -243,7 +621,7 @@ interface ReportLog {
 
 ---
 
-## 六、开发计划
+## 八（原六）、开发计划
 
 ### 阶段 1：核心功能（预计 2-3 天）
 
@@ -269,7 +647,7 @@ interface ReportLog {
 
 ---
 
-## 七、风险与依赖
+## 九（原七）、风险与依赖
 
 | 风险 | 影响 | 应对措施 |
 |------|------|---------|
@@ -280,7 +658,7 @@ interface ReportLog {
 
 ---
 
-## 八、已确认事项
+## 十（原八）、已确认事项
 
 | 项 | 结论 |
 |------|------|
@@ -298,8 +676,9 @@ interface ReportLog {
 
 ---
 
-## 九、参考资料
+## 十一（原九）、参考资料
 
 - 高德路径规划 API：https://lbs.amap.com/api/webservice/guide/api/driving
+- 高德地理编码 API：https://lbs.amap.com/api/webservice/guide/api/georegeo
 - 高德地图 JS API：https://lbs.amap.com/api/javascript-api/summary
-- 小鹏救援接口：见 2.2 节
+- 小鹏救援接口：见 2.5 节
